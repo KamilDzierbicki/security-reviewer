@@ -7,7 +7,7 @@ import {
 import type { Redis } from 'ioredis';
 import { filter, Subject, type Observable } from 'rxjs';
 import { PROGRESS_CHANNEL } from '../pipeline/queues.js';
-import { REDIS } from '../redis/redis.module.js';
+import { logRedisErrors, REDIS } from '../redis/redis.module.js';
 
 @Injectable()
 export class ProgressSubscriber implements OnModuleInit, OnModuleDestroy {
@@ -18,7 +18,7 @@ export class ProgressSubscriber implements OnModuleInit, OnModuleDestroy {
   constructor(@Inject(REDIS) private readonly redis: Redis) {}
 
   async onModuleInit() {
-    this.subscriber = this.redis.duplicate();
+    this.subscriber = logRedisErrors(this.redis.duplicate());
     this.subscriber.on('message', (_channel: string, runId: string) =>
       this.updates$.next(runId),
     );

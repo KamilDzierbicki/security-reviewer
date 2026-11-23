@@ -2,6 +2,7 @@ import {
   Global,
   Inject,
   Injectable,
+  Logger,
   Module,
   type OnApplicationShutdown,
 } from '@nestjs/common';
@@ -10,6 +11,18 @@ import { Redis } from 'ioredis';
 import { redisConfig } from '../config/namespaces.js';
 
 export const REDIS = Symbol('REDIS');
+
+const logger = new Logger('Redis');
+
+/**
+ * ioredis reconnects on its own; without an 'error' listener every failed
+ * attempt (for example while Redis restarts) is printed as an unhandled event.
+ */
+export function logRedisErrors(client: Redis): Redis {
+  return client.on('error', (error: Error) =>
+    logger.warn(`Redis connection error: ${error.message}`),
+  );
+}
 
 @Injectable()
 class RedisShutdown implements OnApplicationShutdown {
@@ -27,7 +40,7 @@ class RedisShutdown implements OnApplicationShutdown {
       provide: REDIS,
       inject: [redisConfig.KEY],
       useFactory: (redis: ConfigType<typeof redisConfig>) =>
-        new Redis(redis.url),
+        logRedisErrors(new Redis(redis.url)),
     },
     RedisShutdown,
   ],
