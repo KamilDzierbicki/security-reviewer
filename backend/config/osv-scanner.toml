@@ -1,0 +1,2 @@
+# Intentionally empty: overrides any osv-scanner.toml inside a scanned
+# repository, so the repository cannot ignore its own vulnerabilities.

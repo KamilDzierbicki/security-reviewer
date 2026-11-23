@@ -1,0 +1,138 @@
+name: security-reviewer
+
+# Local defaults let `docker compose up` work from a clean clone. They are not
+# the vendors' well-known defaults; override all of them through .env (see
+# .env.example) for anything beyond local use. With NODE_ENV=production the
+# app refuses to start while a secret still has its "local-only-" default.
+x-app-env: &app-env
+  NODE_ENV: ${NODE_ENV:-development}
+  DATABASE_URL: postgres://security_reviewer:${POSTGRES_PASSWORD:-security-reviewer-local-db-8f3a1c}@postgres:5432/security_reviewer
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: ${JWT_SECRET:-local-only-jwt-secret-5b2e9d7c41a84f0e9c3b}
+  FINGERPRINT_KEY: ${FINGERPRINT_KEY:-local-only-fingerprint-key-a71c4e09d2b3}
+  S3_ENDPOINT: http://rustfs:9000
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-security-reviewer-local-7d41}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-local-only-rustfs-secret-c9e2a5b8f1}
+  S3_BUCKET: scan-artifacts
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+
+services:
+  # React app and the only entry point: nginx serves the build and proxies
+  # /api to the backend.
+  frontend:
+    build: ./frontend
+    image: security-reviewer-frontend:local
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api: { condition: service_healthy }
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    image: security-reviewer:local
+    command: ["node", "dist/main.js"]
+    environment:
+      <<: *app-env
+      TRUST_PROXY_HOPS: "1"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [default, backend]
+    restart: unless-stopped
+
+  # Scale with: docker compose up --scale worker=3
+  worker:
+    build: ./backend
+    image: security-reviewer:local
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *app-env
+      SCAN_WORKDIR: /scans
+      SCAN_CONCURRENCY: "2"
+    depends_on:
+      api: { condition: service_healthy } # migrations have run
+      rustfs: { condition: service_healthy }
+    # Foreign code is only ever read, on a size-capped tmpfs, in a read-only
+    # container without capabilities.
+    read_only: true
+    tmpfs:
+      - "/scans:size=1g,mode=1777"
+      - "/tmp:size=64m"
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 256
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [default, backend]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18.7-alpine
+    environment:
+      POSTGRES_USER: security_reviewer
+      POSTGRES_DB: security_reviewer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-security-reviewer-local-db-8f3a1c}
+    volumes: ["postgres-data:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U security_reviewer -d security_reviewer"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.10.3-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  # Local S3 for transient scan snapshots. Internal network only; no ports
+  # are published (uncomment the console for local debugging).
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-security-reviewer-local-7d41}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-local-only-rustfs-secret-c9e2a5b8f1}
+      RUSTFS_CONSOLE_ENABLE: "false"
+    volumes: ["rustfs-data:/data"]
+    # ports: ["127.0.0.1:9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+    restart: unless-stopped
+
+networks:
+  # No route to the outside: only api and worker can reach the data stores.
+  backend:
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  rustfs-data:
